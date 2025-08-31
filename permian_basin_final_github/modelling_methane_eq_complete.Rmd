@@ -1,0 +1,824 @@
+---
+title: "modelling_methane_eq_complete"
+output: html_document
+date: "2025-07-11"
+---
+
+# Complete Code {.tabset}
+
+## Libraries And Packages
+```{r}
+## Libraries
+library(dplyr)
+library(janitor)
+library(sf)
+library(ggplot2)
+library(leaflet)
+library(leaflet.extras)
+library(dbscan)
+library(RColorBrewer)
+library(scales)
+library(ggspatial)
+library(knitr)
+library(DiagrammeR)
+library(doParallel)
+library(foreach)
+library(data.table)
+library(gridExtra) 
+library(mapview)
+library(webshot)
+library(xgboost)
+library(tidyr)
+library(kableExtra)
+library(grDevices)
+library(plotly)
+
+knitr::opts_chunk$set(webshot = TRUE)
+
+source("src/hdbscan_functions.R")
+source("src/xgboost_functions.R")
+```
+
+## Data Processing
+### Permian Basin Data Aggregation
+```{r}
+# Loading the aggregated file
+raw_viirs_data = readRDS("datasets/complete_datasets/raw_viirs_data_2023_to_2024.rds")
+print(paste("Total number of observed combustion events globally:", nrow(raw_viirs_data)))
+
+# Filtering for points near and within the Permian Basin for faster computational time
+raw_viirs_data = raw_viirs_data %>% filter(between(lat, 15, 72), between(lon, -168, -52))
+```
+
+### Variable Transformations
+```{r}
+# Part A: Converting 999,999 to NA
+raw_viirs_data = raw_viirs_data %>% mutate(across(where(is.numeric), ~ ifelse(. == 999999, NA, .)))
+
+# Part B: Convert to julian_date
+raw_viirs_data = raw_viirs_data %>% mutate(julian_date = as.numeric(format(as.Date(date), "%j"))) %>% select(-date)
+
+# Part C: Projecting dataset's 'lon' and 'lat' columns into UTM13 (EPSG:32613) in km
+utm_coords = st_coordinates(st_transform(st_as_sf(raw_viirs_data, coords = c("lon", "lat"), crs = 4326), crs = 32613)) / 1000
+raw_viirs_data = raw_viirs_data %>% mutate(lon_km_utm13 = utm_coords[,1], lat_km_utm13 = utm_coords[,2]) %>% select(-lon, -lat)
+```
+
+### Spatial Filtering
+```{r}
+# Part A: Loading the shapefile
+shape_data = st_read("shape_file/pb_shape.shp")
+
+# Part B: Transform shapefile to UTM13 and convert to km
+shape_data = shape_data %>% st_transform(crs = 32613)
+shape_data = st_set_geometry(shape_data, st_geometry(shape_data) / 1000)
+
+# Part C: Convert dataset into spatial object using UTM13 coordinates in km
+points_sf = st_as_sf(raw_viirs_data, coords = c("lon_km_utm13", "lat_km_utm13"), remove = FALSE)
+st_crs(shape_data) = NA
+
+# Part D: Final intersection
+intersection_indices = st_intersects(points_sf, shape_data, sparse = FALSE)
+points_within_basin = points_sf[apply(intersection_indices, 1, any), ] %>% select(-id)
+print(paste("Total number of potential Permian Basin combustion events:", nrow(points_within_basin)))
+
+# Garbage Removal
+rm(utm_coords)
+```
+
+### Temperature Filtering
+Filter for temperature >1600K
+```{r}
+points_final = points_within_basin %>% filter(temp_bb > 1600)
+print(paste("Total number of observed Permian Basin combustion events with Temperature > 1600K:", nrow(points_final)))
+```
+
+### Statistical Methods: HDBSCAN Clustering
+```{r}
+source("src/hdbscan_functions.R")
+hdbscan_analysis_df = hdbscan_analysis(mode = 1)
+```
+
+Merging the HDBSCAN data with the viirs dataset:
+```{r}
+source("src/hdbscan_functions.R")
+hdbscan_dataset = hdbscan_dataset_merge(mode = 1, minPts = 6)
+```
+
+
+### Noise Analysis
+```{r}
+# Part A: Filter by Cluster == 0 Noise Points & Filter By Non-Na Methane_EQ Noise Points
+hdbscan_dataset_noise = hdbscan_dataset %>% filter(cluster == 0)
+noise_with_methane = hdbscan_dataset_noise %>% filter(!is.na(methane_eq))
+
+# Part B: Proportion Calculations
+total_noise_points = nrow(hdbscan_dataset_noise)
+non_na_methane_noise = nrow(noise_with_methane)
+na_methane_noise = total_noise_points - non_na_methane_noise
+
+cat("Noise Points (Cluster == 0):\n")
+cat("Total points:", total_noise_points, "\n")
+cat("Non-NA methane_eq:", non_na_methane_noise, "(", round(non_na_methane_noise/total_noise_points*100, 1), "%)\n")
+cat("NA methane_eq:", na_methane_noise, "(", round(na_methane_noise/total_noise_points*100, 1), "%)\n")
+```
+
+### Noise Reclassification
+```{r}
+# Part A: Creating Noise Distance Dataset
+hdbscan_non_na_methane_noise_dataset = hdbscan_noise_distance_calculation(mode = 1,
+                                                                          noise_with_methane = noise_with_methane,
+                                                                          hdbscan_dataset_filtered = hdbscan_dataset_filtered)
+
+# Part B: Creating Frequency Distribution
+mean_distance = mean(hdbscan_non_na_methane_noise_dataset$nearest_cluster_distance)
+median_distance = median(hdbscan_non_na_methane_noise_dataset$nearest_cluster_distance)
+
+distance_plot = ggplot(hdbscan_non_na_methane_noise_dataset, aes(x = nearest_cluster_distance)) +
+  geom_histogram(bins = 100, fill = "black", color = "black", alpha = 0.7) +
+  geom_segment(aes(x = mean_distance, xend = mean_distance, y = 0, yend = 80), color = "red", linetype = "dashed", size = 1) +
+  geom_segment(aes(x = median_distance, xend = median_distance, y = 0, yend = 100), color = "red", linetype = "dashed", size = 1) +
+  annotate("text", x = mean_distance + 0.5, y = 80, label = paste("Mean =", round(mean_distance, 2), "km"), color = "red", vjust = 0, hjust = 0) +
+  annotate("text", x = median_distance + 0.55, y = 100, label = paste("Median =", round(median_distance, 2), "km"), color = "red", vjust = 0, hjust = 0) +
+  coord_cartesian(xlim = c(0, 5)) +
+  labs(title = "Distance from Noise Points (with Methane) to Nearest Cluster", x = "Distance to Nearest Cluster (km)", y = "Frequency") +
+  theme_minimal()
+
+interactive_plot = ggplotly(distance_plot, tooltip = c("x", "y"))
+interactive_plot
+```
+
+Breakdown of the above noise:
+```{r}
+DiagrammeR::grViz("
+digraph flowchart {
+  graph [layout = dot, rankdir = TB]
+  
+  # Node styles
+  node [shape = rectangle, style = filled, fontname = Arial]
+  
+  # Level 1 - Initial classification
+  A [label = '5,928 observations\\n(classified as noise by HDBSCAN)']
+  
+  # Level 2 - Methane data split
+  B1 [label = '1,122 observations (18.9%)\\n(with Non-NA Methane Eq.)']
+  B2 [label = '4,806 observations (81.1%)\\n(with NA Methane Eq.)']
+  
+  # Level 3 - Distance analysis (only for B1 - points with methane data)
+  C1 [label = '585 observations (52.2% of 1,122)\\n(within 750m of a nearest cluster)']
+  C2 [label = '537 observations (47.8% of 1,122)\\n(beyond 750m of a nearest cluster)']
+  
+  # Edges (diagonal is fine for these)
+  A -> B1
+  A -> B2
+  B1 -> C1
+  B1 -> C2
+  
+  # Add some spacing between levels
+  {rank = same; B1; B2}
+  {rank = same; C1; C2}
+}
+")
+```
+
+
+### Removing Noise Points
+```{r}
+# Part A: Reassign points within 750m of the nearest edge to their nearest cluster
+points_to_reassign = hdbscan_non_na_methane_noise_dataset %>% filter(nearest_cluster_distance <= 0.75 & !is.na(methane_eq))
+
+# Part B: Index-Match the the non-na methane_eq noise point, then replace it's cluster id
+if(nrow(points_to_reassign) > 0) {
+  for(i in 1:nrow(points_to_reassign)) {
+    row_idx = which(hdbscan_dataset$cluster == 0 & 
+                    hdbscan_dataset$lon_km_utm13 == points_to_reassign$lon_km_utm13[i] & 
+                    hdbscan_dataset$lat_km_utm13 == points_to_reassign$lat_km_utm13[i])
+    
+    if(length(row_idx) > 0) {
+      hdbscan_dataset$cluster[row_idx] = points_to_reassign$nearest_cluster[i]
+    }
+  }
+}
+
+# Part C: Removing remaining noise points
+hdbscan_dataset_final = hdbscan_dataset %>% filter(cluster != 0)
+
+# Part D: Summary Statistics
+before_count = nrow(hdbscan_dataset)
+after_count = nrow(hdbscan_dataset_final)
+removed_count = before_count - after_count
+reassigned_count = nrow(points_to_reassign)
+
+cat(sprintf("Noise points with non-NA methane_eq within 0.75km of nearest cluster: %d\n", reassigned_count))
+cat(sprintf("Total number of potential Permian Basin combustion events that are non-noise observations: %d\n", after_count))
+cat(sprintf("Points removed: %d (%.1f%%)\n", removed_count, (removed_count/before_count)*100))
+
+# (Optional) Save the dataset
+save_hdbscan_final_dataset = function(dataset, minPts) {
+  csv_filename = sprintf("datasets/complete_datasets/final_hdbscan_dataset.csv", minPts)
+  write.csv(dataset, csv_filename, row.names = FALSE)
+}
+
+save_hdbscan_final_dataset(hdbscan_dataset_final, 6)
+```
+
+#### Map 1: Location Of Clusters
+Map of the HDBSCAN clusters identified
+```{r}
+# Part A: Find cluster centers & project to WGS84
+cluster_centroids = hdbscan_dataset_final %>% 
+  group_by(cluster) %>%
+  summarise(
+    centroid_lon_m = mean(lon_km_utm13, na.rm = TRUE) * 1000,
+    centroid_lat_m = mean(lat_km_utm13, na.rm = TRUE) * 1000,
+    cluster_size = n(),
+    .groups = 'drop'
+  )
+centroids_sf = st_as_sf(cluster_centroids, coords = c("centroid_lon_m", "centroid_lat_m"), crs = 32613) %>% st_transform(crs = 4326)
+
+# Part B: Create unified shape boundary
+shape_data_combined = shape_data %>%
+  st_set_geometry(st_geometry(.) * 1000) %>%
+  st_set_crs(32613) %>%
+  st_union() %>%
+  st_sf() %>%
+  st_transform(crs = 4326)
+
+cluster_centroids_geo = cluster_centroids %>% mutate(lon_geo = st_coordinates(centroids_sf)[,1], lat_geo = st_coordinates(centroids_sf)[,2])
+
+# Part C: HDBSCAN Map with scale bar
+hdbscan_map = leaflet() %>%
+  addTiles() %>%
+  addPolygons(data = shape_data_combined,
+              fillColor = "lightblue",
+              fillOpacity = 0.3,
+              color = "darkblue",
+              weight = 2,
+              popup = "Permian Basin") %>%
+  addCircleMarkers(data = cluster_centroids_geo,
+    lng = ~lon_geo,
+    lat = ~lat_geo,
+    radius = 3,
+    color = "red",
+    fillColor = "red",
+    fillOpacity = 0.7,
+    popup = ~paste("Cluster:", cluster, "<br>",
+                   "Size:", cluster_size, "observations<br>",
+                   "Coordinates:", round(lon_geo, 4), ",", round(lat_geo, 4))) %>%
+  addScaleBar(position = "bottomright",
+              options = scaleBarOptions(
+                maxWidth = 100,
+                metric = TRUE,
+                imperial = TRUE,
+                updateWhenIdle = TRUE
+              ))
+
+hdbscan_map
+```
+
+#### Map 2: Heatmap Of Clusters
+```{r}
+# Part A: Convert data to UTM13 coordinates for use
+heatmap_points = hdbscan_dataset_final %>%
+  st_as_sf(coords = c("lon_km_utm13", "lat_km_utm13"), crs = 32613) %>%
+  st_set_geometry(st_geometry(.) * 1000) %>%
+  st_set_crs(32613) %>%
+  st_transform(crs = 4326)
+
+heatmap_coords = st_coordinates(heatmap_points)
+heatmap_data = data.frame(lat = heatmap_coords[,2], lng = heatmap_coords[,1])
+
+# Part B: HDBSCAN Heatmap
+heatmap_leaflet = leaflet() %>%
+  addTiles() %>%
+  
+  addPolygons(data = shape_data_combined,
+              fillColor = "lightblue",
+              color = "darkblue",
+              weight = 2,
+              fillOpacity = 0.3,
+              popup = "Permian Basin") %>%
+  
+  addHeatmap(data = heatmap_data,
+             lng = ~lng,
+             lat = ~lat,
+             blur = 10,        # Increased blur for smoother transitions
+             max = 0.6,        # Reduced max for better blending
+             radius = 10,      # Increased radius for more overlap
+             minOpacity = 0.1, # Add minimum opacity for continuous feel
+             gradient = c("purple", "blue", "cyan", "yellow", "orange", "red")) %>%
+  
+  addLegend(
+    position = "bottomright",
+    colors = c("purple", "blue", "cyan", "yellow", "orange", "red"),
+    labels = c("0-10", "10-25", "25-50", "50-100", "100-150", "150+"),
+    title = "Flares/km²",
+    opacity = 0.8
+  ) %>%
+  
+  addScaleBar(position = "bottomright",
+              options = scaleBarOptions(
+                maxWidth = 100,
+                metric = TRUE,
+                imperial = TRUE,
+                updateWhenIdle = TRUE
+              ))
+
+heatmap_leaflet
+```
+
+### Missing vs. Non-Missing Methane Eq.
+```{r}
+# Part A: Filter By Missing and Non Missing
+hdbscan_dataset_non_na = hdbscan_dataset_final %>% filter(!is.na(methane_eq))
+hdbscan_dataset_na = hdbscan_dataset_final %>% filter(is.na(methane_eq))
+
+# Part B: Proportion Calculations
+total_obs = nrow(hdbscan_dataset_final)
+methane_non_na = nrow(hdbscan_dataset_non_na)
+methane_na = nrow(hdbscan_dataset_na)
+methane_non_na_pct = round(100 * methane_non_na / total_obs, 2)
+methane_na_pct = round(100 * methane_na / total_obs, 2)
+
+# Part C: Summary
+print(paste("Total number of potential Permian Basin combustion events (valid):", total_obs))
+print(paste("Non-NA methane_eq observations:", methane_non_na, "(", methane_non_na_pct, "%)"))
+print(paste("NA methane_eq observations:", methane_na, "(", methane_na_pct, "%)"))
+```
+
+Breakdown of above:
+```{r}
+DiagrammeR::grViz("
+digraph flowchart {
+  graph [layout = dot, rankdir = TB]
+
+  # Nodes
+  node [shape = rectangle, style = filled, fillcolor = lightgrey, fontname = Arial]
+  A [label = '24,412,309 observations\n(Total Observations from VIIRS Satellite)']
+  B [label = '139,907 observations\n(Intersected Observations Within Permian Basin)']
+  C [label = '80,007 observations\n(Temperature ≥ 1600 K)']
+  D [label = '74,664 observations\n(Clustered by HDBSCAN)']
+  E1 [label = '22,087 observations (29.6%)\n(Non-Missing Methane)']
+  E2 [label = '52,577 observations (70.4%)\n(Missing Methane)']
+
+  # Edges
+  A -> B [label = '    Spatial Intersection']
+  B -> C [label = '    Temperature ≥ 1600 K']
+  C -> D [label = '    5,343 Points Removed']
+  D -> E1 
+  D -> E2 [label = '']
+}
+")
+```
+
+## Modelling
+### Mann-Whitney U Test
+Using a Mann-Whitnney U Test to determine if there are significant difference between the sample with missing methane_eq and non-missing methane_eq
+```{r}
+features_to_test = c("temp_bb", "rh", "area_bb", "cloud_mask", "lon_km_utm13", "lat_km_utm13", "julian_date")
+
+# Function to perform Mann-Whitney U test and calculate effect size
+perform_mann_whitney = function(feature_name, missing_data, non_missing_data) {
+  
+  # Extract feature values (remove NA values)
+  missing_values = missing_data[[feature_name]]
+  non_missing_values = non_missing_data[[feature_name]]
+  
+  # Remove NA values
+  missing_values = missing_values[!is.na(missing_values)]
+  non_missing_values = non_missing_values[!is.na(non_missing_values)]
+  
+  # Check if we have enough data
+  if (length(missing_values) < 5 || length(non_missing_values) < 5) {
+    return(data.frame(
+      feature = feature_name,
+      n_missing = length(missing_values),
+      n_non_missing = length(non_missing_values),
+      median_missing = NA,
+      median_non_missing = NA,
+      median_difference = NA,
+      mann_whitney_statistic = NA,
+      p_value = NA,
+      effect_size_r = NA,
+      effect_size_interpretation = "Insufficient data"
+    ))
+  }
+  
+  # Perform Mann-Whitney U test (Wilcoxon rank-sum test)
+  test_result = wilcox.test(missing_values, non_missing_values, alternative = "two.sided")
+  
+  # Calculate medians and difference
+  median1 = median(missing_values)
+  median2 = median(non_missing_values)
+  n1 = length(missing_values)
+  n2 = length(non_missing_values)
+  n_total = n1 + n2
+  
+  # Calculate effect size (r = Z / sqrt(N))
+  # Convert W statistic to Z-score approximation for large samples
+  expected_w = n1 * n2 / 2
+  variance_w = n1 * n2 * (n1 + n2 + 1) / 12
+  z_score = (test_result$statistic - expected_w) / sqrt(variance_w)
+  effect_size_r = abs(z_score) / sqrt(n_total)
+  
+  # Interpret effect size
+  if (effect_size_r < 0.1) {
+    effect_interpretation = "Negligible"
+  } else if (effect_size_r < 0.3) {
+    effect_interpretation = "Small"
+  } else if (effect_size_r < 0.5) {
+    effect_interpretation = "Medium"
+  } else {
+    effect_interpretation = "Large"
+  }
+  
+  return(data.frame(
+    feature = feature_name,
+    n_missing = n1,
+    n_non_missing = n2,
+    median_missing = median1,
+    median_non_missing = median2,
+    median_difference = median1 - median2,
+    mann_whitney_statistic = as.numeric(test_result$statistic),
+    p_value = test_result$p.value,
+    effect_size_r = effect_size_r,
+    effect_size_interpretation = effect_interpretation
+  ))
+}
+
+# Perform Tests On All Features
+results_list = list()
+for (feature in features_to_test) {
+  results_list[[feature]] = perform_mann_whitney(feature, hdbscan_dataset_na, hdbscan_dataset_non_na)
+}
+
+# Combine Results
+test_results = do.call(rbind, results_list)
+
+# Represent Results
+clean_table = test_results %>%
+  select(feature, median_missing, median_non_missing, median_difference, mann_whitney_statistic, p_value, effect_size_r) %>%
+  mutate(
+    median_missing = round(median_missing, 2),
+    median_non_missing = round(median_non_missing, 2), 
+    median_difference = round(median_difference, 2),
+    mann_whitney_statistic = round(mann_whitney_statistic, 2),
+    p_value = ifelse(p_value < 1e-10, sprintf("%.2e", p_value), round(p_value, 6)),
+    effect_size_r = round(effect_size_r, 3)
+  )
+
+# Print Table
+kable(clean_table, 
+      col.names = c("feature", "median_missing", "median_non_missing", "median_difference", "mann_whitney_statistic", "p_value", "effect_size_r"),
+      caption = "Mann-Whitney U Test: Median Comparison Between Missing and Non-Missing Methane Groups")
+```
+
+
+### XGBoost
+```{r}
+dataset_filtered = hdbscan_dataset_final %>% filter(!is.na(methane_eq))
+features = c("temp_bb", "rh", "area_bb", "cloud_mask", "lon_km_utm13", "lat_km_utm13", "julian_date")
+```
+
+### Hyperparameter Tuning
+```{r}
+all_results = evaluate_or_load(mode = 1, dataset_filtered, features, save_models = TRUE)
+```
+
+
+### XGBoost: Model Selection
+Model Parameters:
+
+- dataset_split = 0.75
+- eta = 0.3
+- max_depth = 7
+- subsample = 1.0
+- colsample_bytree = 1,0
+- min_child_weight = 1
+- gamma = 0
+- lambda = 0.1
+
+```{r}
+set.seed(1234)
+
+# Part A: Dataset Modifications (Adding Column For Missingness Status Of Target Methane_EQ)
+raw_dataset = hdbscan_dataset_final %>%
+  mutate(methane_eq_missingness_indicator = as.integer(is.na(methane_eq))) %>%
+  relocate(methane_eq_missingness_indicator, .after = methane_eq)
+
+# Part B: Create Model
+results = create_xgb_model_and_predictions(
+  all_results = all_results,
+  dataset_split_value = 0.75,
+  eta_value = 0.3,
+  max_depth_value = 7.0,
+  subsample_value = 1.0,
+  colsample_bytree_value = 1.0,
+  min_child_weight_value = 1.0,
+  gamma_value = 0.0,
+  lambda_value = 0.1,
+  alpha_value = 0.0,
+  observed_only_dataset = hdbscan_dataset_non_na,
+  raw_dataset = raw_dataset,
+  features = features,
+  nrounds = 100
+)
+
+model = results$model
+model_dataset = results$model_dataset
+filtered_row = results$filtered_row
+```
+
+### XGBoost: Model Evaluation
+Histogram of actual methane_eq data (target):
+```{r}
+plot_observed_variable(hdbscan_dataset_non_na, raw_dataset)
+```
+
+
+Histogram of predicted methane_eq data (by model):
+```{r}
+plot_observed_histogram(model_dataset)
+```
+
+Histogram of predicted methane_eq by model across all points in the dataset (both missing and non-missing):
+```{r}
+plot_model_histogram(model_dataset, title = "Histogram Of Model (Observed + Missing), Highest R2 Model")
+```
+
+Obsered vs Predicted plot. Red line is the true y=x line, blue line is the bias:
+```{r}
+train_r2_observed_vs_predicted_plot = plot_observed_vs_predicted(data = model_dataset, title = "Observed vs Predicted, Highest R2 Model")
+train_r2_observed_vs_predicted_plot
+```
+
+Bias Analysis
+```{r} 
+calculate_and_display_bias_metrics(data = model_dataset, caption = "Bias Summary Metrics, Highest R2 Model")
+```
+
+Training vs Testing Evaluation
+```{r}
+display_train_test_metrics(filtered_row = filtered_row, caption = "Training vs Testing Metrics, Highest R2 Model")
+```
+
+(Below is not included in the paper, but is still interesting to note)
+
+Feature Importance
+```{r}
+plot_feature_importance(model = model, feature_names = features, top_n = 20)
+```
+
+Diagnostic plots (except for Cook's Distance, as this is not a linear model):
+```{r}
+create_diagnostic_plots(model_dataset)
+```
+
+### XGBoost: Model Imputation
+Histogram of all the imputed methane_eq values but differentiated by color. Green is the observed values, blue are the predicted values from the model:
+```{r}
+result_train_r2 = plot_imputed_histogram(model_dataset)
+result_train_r2$plot
+
+observed_peak = result_train_r2$peak_observed
+imputed_peak = result_train_r2$peak_imputed
+peak_diff = result_train_r2$peak_difference
+```
+
+### XGBoost: All Metrics
+```{r}
+results_train_r2 = extract_and_display_clustering_metrics(
+  model = model, 
+  data = model_dataset, 
+  name = "Train R2",
+  peak_obs_lbl = observed_peak,
+  peak_imp_lbl = imputed_peak, 
+  peak_diff_lbl = peak_diff,
+  caption = "Statistics, Highest R2 Model"
+)
+
+results_train_r2$table
+```
+
+
+## Time Series Modelling Of Combustion
+### Decades Long Analysis
+From Jan 1, 2013 to Dec 31, 2024
+```{r}
+# Part 1: Loading Dataset and Date modifications
+decade_dataset = readRDS("datasets/time_series_datasets/raw_viirs_data_2013_to_2024.rds")
+decade_dataset$date = as.Date(decade_dataset$date)
+decade_dataset$year = as.numeric(format(decade_dataset$date, "%Y"))
+
+# Part 2: Count flares by year
+flare_counts = decade_dataset %>%
+  group_by(year) %>%
+  summarise(flare_count = n(), .groups = 'drop') %>%
+  arrange(year)
+
+# Part 3: Summary Statistics
+print(flare_counts)
+total_flares = sum(flare_counts$flare_count)
+average_flares = round(mean(flare_counts$flare_count), 0)
+median_flares = median(flare_counts$flare_count)
+max_year = flare_counts$year[which.max(flare_counts$flare_count)]
+max_flares = max(flare_counts$flare_count)
+min_year = flare_counts$year[which.min(flare_counts$flare_count)]
+min_flares = min(flare_counts$flare_count)
+
+cat("Total flares (2013-2023):", format(total_flares, big.mark = ","), "\n")
+cat("Average flares per year:", format(average_flares, big.mark = ","), "\n")
+cat("Median flares per year:", format(median_flares, big.mark = ","), "\n")
+cat("Maximum:", max_year, "with", format(max_flares, big.mark = ","), "flares\n")
+cat("Minimum:", min_year, "with", format(min_flares, big.mark = ","), "flares\n")
+
+# Part 4: Bar Graph
+flare_bar_plot = ggplot(flare_counts, aes(x = factor(year), y = flare_count)) +
+  geom_bar(stat = "identity", fill = "black", color = "black", alpha = 0.7, width = 0.8) +
+  geom_text(aes(x = factor(year), y = flare_count + 2000, label = format(flare_count, big.mark = ",")), 
+            size = 4, color = "black", hjust = 0.5) +
+  labs(
+    title = "Number of Flares by Year",
+    x = "Year",
+    y = "Frequency"
+  ) +
+  scale_y_continuous(labels = scales::comma_format()) +
+  coord_cartesian(ylim = c(0, max(flare_counts$flare_count) * 1.1)) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 3),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+interactive_flare_plot = ggplotly(flare_bar_plot, tooltip = c("x", "y"))
+interactive_flare_plot
+```
+
+YoY percent change:
+```{r}
+# Part 1: Calculate Year-over-Year Percentage Change
+flare_change = flare_counts %>%
+  arrange(year) %>%
+  mutate(
+    previous_year_count = lag(flare_count),
+    yoy_change = ((flare_count - previous_year_count) / previous_year_count) * 100,
+    yoy_change_rounded = round(yoy_change, 1)
+  ) %>%
+  filter(!is.na(yoy_change))  # Remove first year (no previous year to compare)
+
+# Part 2: Summary Statistics for YoY Changes
+print("Year-over-Year Changes:")
+
+average_change = round(mean(flare_change$yoy_change), 1)
+median_change = round(median(flare_change$yoy_change), 1)
+max_increase_year = flare_change$year[which.max(flare_change$yoy_change)]
+max_increase = round(max(flare_change$yoy_change), 1)
+max_decrease_year = flare_change$year[which.min(flare_change$yoy_change)]
+max_decrease = round(min(flare_change$yoy_change), 1)
+
+cat("\n=== Year-over-Year Change Summary ===\n")
+cat("Average YoY change:", average_change, "%\n")
+cat("Median YoY change:", median_change, "%\n")
+cat("Largest increase:", max_increase_year, "with", max_increase, "% increase\n")
+cat("Largest decrease:", max_decrease_year, "with", max_decrease, "% decrease\n")
+
+# Part 3: Bar Graph for YoY Percentage Change
+yoy_change_plot = ggplot(flare_change, aes(x = factor(year), y = yoy_change)) +
+  geom_bar(stat = "identity", 
+           aes(fill = yoy_change > 0), 
+           color = "black", 
+           alpha = 0.7, 
+           width = 0.8) +
+  scale_fill_manual(values = c("TRUE" = "darkgreen", "FALSE" = "darkred"), guide = "none") +
+  geom_text(aes(x = factor(year), 
+                y = ifelse(yoy_change > 0, yoy_change + 5, yoy_change - 7), 
+                label = paste0(yoy_change_rounded, "%")), 
+            size = 4, 
+            color = "black", 
+            hjust = 0.5) +
+  geom_hline(yintercept = 0, color = "black", linewidth = 0.8) +
+  labs(
+    title = "Year-over-Year Percentage Change in Number of Flares",
+    x = "Year",
+    y = "Percentage Change (%)"
+  ) +
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "none"
+  )
+
+# Part 4: Interactive Plot
+interactive_yoy_plot = ggplotly(yoy_change_plot, tooltip = c("x", "y"))
+interactive_yoy_plot
+```
+
+## Extra
+Summary statistics of all the clusters
+```{r}
+# Part A: Calculate cluster sizes and spatial dimensions
+cluster_analysis = hdbscan_dataset_final %>% 
+  group_by(cluster) %>% 
+  summarise(
+    cluster_size = n(),
+    lon_range_km = max(lon_km_utm13) - min(lon_km_utm13),
+    lat_range_km = max(lat_km_utm13) - min(lat_km_utm13),
+    cluster_area_km2 = lon_range_km * lat_range_km,
+    centroid_lon = mean(lon_km_utm13),
+    centroid_lat = mean(lat_km_utm13),
+    .groups = 'drop'
+  )
+
+# Part B: Summary Statistics
+cat("\nCLUSTER SPATIAL SIZE STATISTICS:\n")
+cat("================================\n")
+cat("Average longitude range (km):", round(mean(cluster_analysis$lon_range_km), 2), "\n")
+cat("Average latitude range (km):", round(mean(cluster_analysis$lat_range_km), 2), "\n")
+cat("Average cluster area (km²):", round(mean(cluster_analysis$cluster_area_km2), 2), "\n")
+cat("Median longitude range (km):", round(median(cluster_analysis$lon_range_km), 2), "\n")
+cat("Median latitude range (km):", round(median(cluster_analysis$lat_range_km), 2), "\n")
+cat("Median cluster area (km²):", round(median(cluster_analysis$cluster_area_km2), 2), "\n")
+
+cat("\nCLUSTER SPATIAL DISTRIBUTION:\n")
+cat("=============================\n")
+cat("Longitude Range (km):\n")
+summary(cluster_analysis$lon_range_km)
+cat("\nLatitude Range (km):\n")
+summary(cluster_analysis$lat_range_km)
+cat("\nCluster Area (km²):\n")
+summary(cluster_analysis$cluster_area_km2)
+
+# Part C: Histogram Of Cluster
+mean_area = mean(cluster_analysis$cluster_area_km2)
+median_area = median(cluster_analysis$cluster_area_km2)
+sd_area = sd(cluster_analysis$cluster_area_km2)
+lower_bound = mean_area - 2 * sd_area
+upper_bound = mean_area + 2 * sd_area
+
+# Create interactive plotly histogram
+cluster_plot_interactive = plot_ly(
+    data = cluster_analysis,
+    x = ~cluster_area_km2,
+    type = "histogram",
+    nbinsx = 500,
+    marker = list(color = "lightgreen", line = list(color = "black", width = 1)),
+    opacity = 0.7,
+    hovertemplate = "Area: %{x:.3f} km²<br>Count: %{y}<extra></extra>"
+  ) %>%
+  
+  add_lines(x = c(mean_area, mean_area), y = c(0, 100), 
+            line = list(color = "red", dash = "dash", width = 2),
+            showlegend = FALSE, hoverinfo = "none") %>%
+  add_lines(x = c(median_area, median_area), y = c(0, 100), 
+            line = list(color = "blue", dash = "dash", width = 2),
+            showlegend = FALSE, hoverinfo = "none") %>%
+
+  add_annotations(
+    x = mean_area, y = 90,
+    text = paste("Mean =", round(mean_area, 2), "km²"),
+    showarrow = FALSE, 
+    font = list(color = "red"),
+    xanchor = "left"
+  ) %>%
+
+  add_annotations(
+    x = median_area, y = 80,
+    text = paste("Median =", round(median_area, 2), "km²"),
+    showarrow = FALSE, 
+    font = list(color = "blue"),
+    xanchor = "left"
+  ) %>%
+
+  layout(
+    title = "Distribution of Cluster Areas (Initial view: 2 Standard Deviations)",
+    xaxis = list(
+      title = "Cluster Area (km²)",
+      range = c(lower_bound, upper_bound)
+    ),
+    yaxis = list(title = "Frequency (Number of Clusters)"),
+    hovermode = "x"
+  )
+
+cluster_plot_interactive
+```
+
+Check the number of missing variables on the selected features
+```{r}
+variables_to_check = c("temp_bb", "rh", "area_bb", "cloud_mask", "lon_km_utm13", "lat_km_utm13", "julian_date")
+total_non_na = nrow(hdbscan_dataset_non_na)
+
+for(var in variables_to_check) {
+ na_count = sum(is.na(hdbscan_dataset_non_na[[var]]))
+ na_pct = round(100 * na_count / total_non_na, 2)
+ print(paste(var, "missing:", na_count, "(", na_pct, "%)"))
+}
+```
+
+Overlay of the observed, predicted, and imputed methane_eq histograms:
+```{r}
+plot_overlapped_histograms(model_dataset, title = "Observed vs Predicted vs Imputed, Highest R2 Model")
+```

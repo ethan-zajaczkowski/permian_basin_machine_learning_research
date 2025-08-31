@@ -1,0 +1,73 @@
+<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>
+<qgis version="3.34.3-Prizren">
+  <identifier>ShalePlays_US_EIA_Dec2021</identifier>
+  <parentidentifier></parentidentifier>
+  <language>ENG</language>
+  <type>dataset</type>
+  <title>Tight Oil and Shale Gas Plays in the U.S.</title>
+  <abstract>General areas for shale plays in the U.S. Source: EIA based on Enverus DrillingInfo Inc., the U.S. Geological Survey, publicly available peer-reviewed research papers, academic theses, and publications of State Geological Agencies. Updated December 2021 with addition of Spraberry and Wolfcamp Plays in the Permian Basin.
+
+This data was created for the purpose of identifying and providing information on shale plays in the United States. </abstract>
+  <keywords vocabulary="Search keys">
+    <keyword>Energy</keyword>
+    <keyword>map</keyword>
+    <keyword>tight oil</keyword>
+    <keyword>shale gas</keyword>
+    <keyword>plays</keyword>
+    <keyword>resources</keyword>
+    <keyword>shapefile</keyword>
+    <keyword>United States</keyword>
+    <keyword>USA</keyword>
+    <keyword>EIA</keyword>
+  </keywords>
+  <keywords vocabulary="gmd:topicCategory">
+    <keyword>energy, shale plays, resources, EIA</keyword>
+  </keywords>
+  <contact>
+    <name>EIA mapping feedback: mapping@eia.gov  </name>
+    <organization></organization>
+    <position></position>
+    <voice></voice>
+    <fax></fax>
+    <email></email>
+    <role></role>
+  </contact>
+  <links/>
+  <history>EIA based on Enverus DrillingInfo Inc., the U.S. Geological Survey, publicly available peer-reviewed research papers, academic theses, and publications of State Geological Agencies. Updated September 2019 with changes to Delaware play boundary. </history>
+  <dates>
+    <date type="Published" value="2019-10-15T00:00:00"/>
+  </dates>
+  <fees></fees>
+  <constraints type="Limitations of use">None (public use). Users are advised to thoroughly review the metadata to understand the appropriate use and limitations of the data. These data and related graphics, if available, are not legal documents and are not intended to be used as such.The information contained in these data is dynamic and may change over time. The U.S. Energy Information Administration gives no warranty, expressed or implied, as to the accuracy, reliability, or completeness of these data.
+</constraints>
+  <rights>U.S. Energy Information Administration, Enverus DrillingInfo Inc., the U.S. Geological Survey</rights>
+  <encoding></encoding>
+  <crs>
+    <spatialrefsys nativeFormat="Wkt">
+      <wkt>GEOGCRS["WGS 84",ENSEMBLE["World Geodetic System 1984 ensemble",MEMBER["World Geodetic System 1984 (Transit)"],MEMBER["World Geodetic System 1984 (G730)"],MEMBER["World Geodetic System 1984 (G873)"],MEMBER["World Geodetic System 1984 (G1150)"],MEMBER["World Geodetic System 1984 (G1674)"],MEMBER["World Geodetic System 1984 (G1762)"],ELLIPSOID["WGS 84",6378137,298.257223563,LENGTHUNIT["metre",1]],ENSEMBLEACCURACY[2.0]],PRIMEM["Greenwich",0,ANGLEUNIT["degree",0.0174532925199433]],CS[ellipsoidal,2],AXIS["geodetic latitude (Lat)",north,ORDER[1],ANGLEUNIT["degree",0.0174532925199433]],AXIS["geodetic longitude (Lon)",east,ORDER[2],ANGLEUNIT["degree",0.0174532925199433]],USAGE[SCOPE["Horizontal component of 3D system."],AREA["World."],BBOX[-90,-180,90,180]],ID["EPSG",4326]]</wkt>
+      <proj4>+proj=longlat +datum=WGS84 +no_defs</proj4>
+      <srsid>3452</srsid>
+      <srid>4326</srid>
+      <authid>EPSG:4326</authid>
+      <description>WGS 84</description>
+      <projectionacronym>longlat</projectionacronym>
+      <ellipsoidacronym>EPSG:7030</ellipsoidacronym>
+      <geographicflag>true</geographicflag>
+    </spatialrefsys>
+  </crs>
+  <extent>
+    <spatial maxz="0" minz="0" crs="EPSG:4326" miny="27.4890749999999997" maxx="-74.8269250000000028" dimensions="2" maxy="49" minx="-121.14789000000000385"/>
+    <temporal>
+      <period>
+        <start>2019-10-15T04:00:00Z</start>
+        <end></end>
+      </period>
+    </temporal>
+    <temporal>
+      <period>
+        <start></start>
+        <end></end>
+      </period>
+    </temporal>
+  </extent>
+</qgis>
